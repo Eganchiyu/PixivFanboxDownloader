@@ -166,7 +166,7 @@ class Settings {
     boldKeywords: true,
     namingRuleList: [],
     showNotificationAfterDownloadComplete: false,
-    zeroPadding: false,
+    zeroPadding: true,
     zeroPaddingLength: 3,
     deduplication: false,
     showHowToUse: true,
