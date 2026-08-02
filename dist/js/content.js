@@ -3872,7 +3872,9 @@ class SaveData {
         const safePostUrl = this.getSafeExternalUrl(postUrl);
         const commonResult = this.getCommonResult(result);
         const htmlPath = _FileName__WEBPACK_IMPORTED_MODULE_6__.fileName.getFileName(Object.assign(Object.assign({}, commonResult), result.textContent));
+        let coverHtml = '';
         let body = '';
+        const cover = result.files.find((file) => file.index === 0);
         if (data.body) {
             if (data.type === 'article') {
                 body = data.body.blocks
@@ -3957,6 +3959,13 @@ class SaveData {
                 }
             }
         }
+        if (cover) {
+            const coverPath = _FileName__WEBPACK_IMPORTED_MODULE_6__.fileName.getFileName(Object.assign(Object.assign({}, commonResult), cover));
+            const relativeCoverPath = this.getRelativePath(htmlPath, coverPath);
+            if (!body.includes(relativeCoverPath)) {
+                coverHtml = this.renderImageSource(relativeCoverPath, cover.name);
+            }
+        }
         return `<!doctype html>
 <html lang="en">
 <head>
@@ -3968,7 +3977,7 @@ class SaveData {
 </head>
 <body>
 <header><h1>${this.escapeHtml(data.title)}</h1><p class="meta"><a href="${this.escapeHtml(safePostUrl)}" rel="noopener noreferrer">${this.escapeHtml(safePostUrl)}</a></p></header>
-<main>${body}</main>
+<main>${coverHtml}${body}</main>
 </body>
 </html>`;
     }

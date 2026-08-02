@@ -377,7 +377,10 @@ class SaveData {
       ...commonResult,
       ...result.textContent,
     })
+    let coverHtml = ''
     let body = ''
+
+    const cover = result.files.find((file) => file.index === 0)
 
     if (data.body) {
       if (data.type === 'article') {
@@ -504,6 +507,17 @@ class SaveData {
       }
     }
 
+    if (cover) {
+      const coverPath = fileName.getFileName({
+        ...commonResult,
+        ...cover,
+      })
+      const relativeCoverPath = this.getRelativePath(htmlPath, coverPath)
+      if (!body.includes(relativeCoverPath)) {
+        coverHtml = this.renderImageSource(relativeCoverPath, cover.name)
+      }
+    }
+
     return `<!doctype html>
 <html lang="en">
 <head>
@@ -517,7 +531,7 @@ class SaveData {
 <header><h1>${this.escapeHtml(data.title)}</h1><p class="meta"><a href="${this.escapeHtml(
       safePostUrl,
     )}" rel="noopener noreferrer">${this.escapeHtml(safePostUrl)}</a></p></header>
-<main>${body}</main>
+<main>${coverHtml}${body}</main>
 </body>
 </html>`
   }
