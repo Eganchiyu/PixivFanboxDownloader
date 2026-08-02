@@ -20,6 +20,8 @@ import { downloadStates } from './DownloadStates'
 import { toast } from '../Toast'
 import { Config } from '../Config'
 import { getTotalDownload } from './GetTotalDownload'
+import { saveData } from '../SaveData'
+import { FileResult, ResultMeta } from '../StoreType'
 
 interface TaskList {
   [id: string]: {
@@ -443,10 +445,38 @@ class DownloadControl {
       let result = store.result[index]
 
       // 对于文本数据，此时创建其 URL
-      if ((result as any).text && (result as any).text.length > 0) {
-        const text = (result as any).text.join('\r\n')
+      // 空正文的 HTML 也需要生成文件，否则无法保存只有资源的投稿
+      if (
+        'text' in result &&
+        (result.text.length > 0 || (result.ext === 'html' && result.htmlData))
+      ) {
+        if (result.ext === 'html' && result.htmlData) {
+          // HTML 需要在下载时生成，才能使用当前任务的本地资源路径
+          const resultMeta: ResultMeta = {
+            postId: result.postId,
+            type: result.type,
+            title: result.title,
+            date: result.date,
+            fee: result.fee,
+            user: result.user,
+            uid: result.uid,
+            createID: result.createID,
+            tags: result.tags,
+            files: store.result.filter(
+              (item) => item.postId === result.postId && !('text' in item),
+            ) as FileResult[],
+            textContent: result,
+          }
+          result.text = [
+            saveData.createHtmlDocument(result.htmlData, resultMeta),
+          ]
+        }
+        const text = result.text.join('\r\n')
         const blob = new Blob([text], {
-          type: 'text/plain',
+          type:
+            result.ext === 'html'
+              ? 'text/html;charset=utf-8'
+              : 'text/plain;charset=utf-8',
         })
         result.url = URL.createObjectURL(blob)
         result.size = blob.size
@@ -478,6 +508,11 @@ class DownloadControl {
         index: index,
         progressBarIndex: progressBarIndex,
         taskBatch: this.taskBatch,
+        // 仅 HTML 文本需要覆盖，避免附件和图片被同名文件覆盖
+        conflictAction:
+          'text' in result && result.ext === 'html'
+            ? 'overwrite'
+            : undefined,
       }
 
       // 保存任务信息
