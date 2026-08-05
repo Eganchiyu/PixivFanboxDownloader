@@ -7,6 +7,7 @@ import {
   PostBody,
   ImageData,
   FileData,
+  CommentData,
 } from './CrawlResult'
 import { settings } from './setting/Settings'
 import { log } from './Log'
@@ -115,6 +116,8 @@ class SaveData {
           lang.transl('_价格限制') +
           ` ${fee}`,
       )
+      // 评论是投稿级别的数据，不依赖正文，也可以保存
+      this.addCommentsToText(result, data)
       if (result.files.length > 0) {
         store.addResult(result)
       }
@@ -346,6 +349,10 @@ class SaveData {
       result.textContent.fileID = this.createFileId()
     }
 
+    // 保存投稿中的评论
+    // 评论不依赖投稿正文，正文之外的信息（链接等）可能包含在评论里
+    this.addCommentsToText(result, data)
+
     if (settings.saveText && settings.textFormat === 'html') {
       result.textContent.ext = 'html'
       result.textContent.htmlData = data
@@ -367,7 +374,7 @@ class SaveData {
     store.addResult(result)
   }
 
-  public createHtmlDocument(data: PostBody, result: ResultMeta) {
+  public async createHtmlDocument(data: PostBody, result: ResultMeta) {
     const postUrl = `https://www.fanbox.cc/@${encodeURIComponent(
       data.creatorId,
     )}/posts/${encodeURIComponent(data.id)}`
@@ -518,22 +525,206 @@ class SaveData {
       }
     }
 
+    const commentsHtml = await this.renderCommentsHtml(data)
+
     return `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self' https: http:; style-src 'unsafe-inline'; script-src 'none'; frame-src 'none'; object-src 'none'; form-action 'none';">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self' data: https: http:; style-src 'unsafe-inline'; script-src 'none'; frame-src 'none'; object-src 'none'; form-action 'none';">
 <title>${this.escapeHtml(data.title)}</title>
-<style>body{max-width:800px;margin:0 auto;padding:24px;font-family:Arial,sans-serif;line-height:1.7;color:#222;overflow-wrap:anywhere}img{max-width:100%;height:auto}a{color:#06c}figure{margin:1.5em 0}h1{line-height:1.3}.meta{color:#666;font-size:.9em}</style>
+<style>body{max-width:800px;margin:0 auto;padding:24px;font-family:Arial,sans-serif;line-height:1.7;color:#222;overflow-wrap:anywhere}img{max-width:100%;height:auto}a{color:#06c}figure{margin:1.5em 0}h1{line-height:1.3}.meta{color:#666;font-size:.9em}.comments{margin-top:2em;border-top:1px solid #ddd;padding-top:1em}.comment{display:flex;gap:.6em;margin:1em 0}.comment-icon{width:32px;height:32px;border-radius:50%;flex-shrink:0}.comment-main{flex:1;min-width:0}.comment-meta{color:#666;font-size:.85em;margin:0 0 .3em}.comment-body{white-space:pre-line}.comment-replies{margin-left:1.5em}</style>
 </head>
 <body>
 <header><h1>${this.escapeHtml(data.title)}</h1><p class="meta"><a href="${this.escapeHtml(
       safePostUrl,
     )}" rel="noopener noreferrer">${this.escapeHtml(safePostUrl)}</a></p></header>
-<main>${coverHtml}${body}</main>
+<main>${coverHtml}${body}${commentsHtml}</main>
 </body>
 </html>`
+  }
+
+  // 把评论转换为纯文本，添加到文本内容里
+  // HTML 格式时，评论会通过 renderCommentsHtml 渲染进 HTML 文档，这里不需要重复添加
+  private addCommentsToText(result: ResultMeta, data: PostBody) {
+    if (!settings.saveComment) {
+      return
+    }
+    // 评论会在 HTML 文档中渲染的前提：正文存在且正文以 HTML 格式保存
+    // 对于正文受价格限制的投稿不会生成 HTML，评论仍以纯文本保存
+    if (data.body && settings.saveText && settings.textFormat === 'html') {
+      return
+    }
+    if (!data.commentList || data.commentList.items.length === 0) {
+      return
+    }
+    const commentLines = this.getCommentLines(data.commentList.items)
+    if (commentLines.length === 0) {
+      return
+    }
+    // 在评论之前添加一个空行，与正文分隔开
+    if (result.textContent.text.length > 0) {
+      result.textContent.text.push('')
+    }
+    result.textContent.text = result.textContent.text.concat(commentLines)
+    result.textContent.fileID ||= this.createFileId()
+  }
+
+  // 把评论数据转换为纯文本的多行文本
+  private getCommentLines(comments: CommentData[]): string[] {
+    const lines: string[] = []
+    const roots = this.buildCommentTree(comments)
+    for (const comment of roots) {
+      this.commentToLines(comment, 0, lines)
+    }
+    return lines
+  }
+
+  // 把一条评论转换为文本行。回复会缩进显示
+  private commentToLines(comment: CommentData, depth: number, lines: string[]) {
+    const indent = '  '.repeat(depth)
+    const user = comment.user ? comment.user.name : ''
+    const body = (comment.body || '')
+      .replace(this.extractTextReg, '')
+      .replace(/&amp;/g, '&')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'")
+    lines.push(`${indent}${user} (${comment.createdDatetime})`)
+    if (body) {
+      for (const line of body.split(/\r?\n/)) {
+        lines.push(indent + line)
+      }
+    }
+    lines.push('')
+    for (const reply of comment.replies) {
+      this.commentToLines(reply, depth + 1, lines)
+    }
+  }
+
+  // 摊平评论（包括嵌套的回复），按 id 去重
+  private flattenComments(comments: CommentData[]): CommentData[] {
+    const flat: CommentData[] = []
+    const seen = new Set<string>()
+    const walk = (list: CommentData[]) => {
+      for (const comment of list) {
+        if (!seen.has(comment.id)) {
+          seen.add(comment.id)
+          flat.push(comment)
+        }
+        if (comment.replies && comment.replies.length > 0) {
+          walk(comment.replies)
+        }
+      }
+    }
+    walk(comments)
+    return flat
+  }
+
+  // 把评论构造成树形结构
+  // FANBOX 返回的评论既有嵌套在 replies 字段里的，也有分页获取时平铺在 items 里的回复
+  // 这里把它们摊平、去重后，再根据 parentCommentId 构造成树
+  private buildCommentTree(comments: CommentData[]): CommentData[] {
+    const map = new Map<string, CommentData>()
+    for (const comment of this.flattenComments(comments)) {
+      map.set(comment.id, { ...comment, replies: [] })
+    }
+
+    const roots: CommentData[] = []
+    for (const comment of map.values()) {
+      if (comment.parentCommentId && map.has(comment.parentCommentId)) {
+        map.get(comment.parentCommentId)!.replies.push(comment)
+      } else {
+        roots.push(comment)
+      }
+    }
+    return roots
+  }
+
+  // 渲染评论部分的 HTML
+  private async renderCommentsHtml(data: PostBody) {
+    if (
+      !settings.saveComment ||
+      !data.commentList ||
+      data.commentList.items.length === 0
+    ) {
+      return ''
+    }
+    const roots = this.buildCommentTree(data.commentList.items)
+    const avatarMap = await this.fetchCommentAvatars(roots)
+    const comments = roots
+      .map((comment) => this.renderCommentHtml(comment, avatarMap))
+      .join('\n')
+    return `<section class="comments"><h2>${this.escapeHtml(
+      lang.transl('_评论'),
+    )}</h2>${comments}</section>`
+  }
+
+  // 抓取评论者的头像，转换为 base64 data URL。失败的头像回退到原网址
+  private async fetchCommentAvatars(comments: CommentData[]) {
+    const map = new Map<string, string>()
+    const seen = new Set<string>()
+    await Promise.all(
+      this.flattenComments(comments).map(async (comment) => {
+        const url = comment.user && comment.user.iconUrl
+        if (url && !seen.has(url)) {
+          seen.add(url)
+          const dataUrl = await this.fetchImageAsDataUrl(url)
+          if (dataUrl) {
+            map.set(url, dataUrl)
+          }
+        }
+      }),
+    )
+    return map
+  }
+
+  // 抓取一张图片并转换为 base64 data URL
+  private async fetchImageAsDataUrl(url: string): Promise<string | null> {
+    try {
+      const response = await fetch(url)
+      if (!response.ok) {
+        return null
+      }
+      const blob = await response.blob()
+      return await new Promise<string | null>((resolve, reject) => {
+        const reader = new FileReader()
+        reader.onload = () => resolve(reader.result as string)
+        reader.onerror = () => reject(reader.error)
+        reader.readAsDataURL(blob)
+      })
+    } catch (error) {
+      // 头像抓取失败时返回 null，渲染时回退到原网址
+      return null
+    }
+  }
+
+  // 渲染一条评论的 HTML。回复会嵌套渲染
+  private renderCommentHtml(
+    comment: CommentData,
+    avatarMap: Map<string, string>,
+  ): string {
+    const user = comment.user ? comment.user.name : ''
+    const avatarUrl = comment.user
+      ? avatarMap.get(comment.user.iconUrl) || comment.user.iconUrl
+      : ''
+    const meta = `${this.escapeHtml(user)} · ${this.escapeHtml(
+      comment.createdDatetime,
+    )}`
+    const avatar = avatarUrl
+      ? `<img class="comment-icon" src="${this.escapeHtml(
+          avatarUrl,
+        )}" alt="" loading="lazy">`
+      : ''
+    const body = this.escapeHtml(comment.body || '')
+    const replies = comment.replies
+      .map((reply) => this.renderCommentHtml(reply, avatarMap))
+      .join('\n')
+    return `<div class="comment">${avatar}<div class="comment-main"><p class="comment-meta">${meta}</p><div class="comment-body">${body}</div>${
+      replies ? `<div class="comment-replies">${replies}</div>` : ''
+    }</div></div>`
   }
 
   private renderInlineText(

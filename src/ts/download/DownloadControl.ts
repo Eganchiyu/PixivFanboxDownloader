@@ -436,7 +436,7 @@ class DownloadControl {
 
   // 查找需要进行下载的作品，建立下载
   // 可选第二个参数：使用缩略图 url 而不是原图 url 进行下载
-  private createDownload(progressBarIndex: number, useThumb: boolean = false) {
+  private async createDownload(progressBarIndex: number, useThumb: boolean = false) {
     const index = downloadStates.getFirstDownloadItem()
 
     if (index === undefined) {
@@ -477,7 +477,7 @@ class DownloadControl {
               textContent: result,
             }
             result.text = [
-              saveData.createHtmlDocument(result.htmlData!, resultMeta),
+              await saveData.createHtmlDocument(result.htmlData!, resultMeta),
             ]
             result.ext = 'html'
           } else {

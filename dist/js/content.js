@@ -126,6 +126,11 @@ class API {
         const url = `https://api.fanbox.cc/post.info?postId=${postId}`;
         return this.request(url);
     }
+    /** 获取投稿的评论列表。offset 用于分页，limit 是单次获取的数量 */
+    static async getPostComments(postId, offset = 0, limit = 50) {
+        const url = `https://api.fanbox.cc/post.getComments?postId=${postId}&offset=${offset}&limit=${limit}`;
+        return this.request(url);
+    }
 }
 
 
@@ -1406,7 +1411,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ });
 /* harmony import */ var _Config__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./Config */ "./src/ts/Config.ts");
 
-// 已使用的最大编号为 60
+// 已使用的最大编号为 61
 const formHtml = `<form class="settingForm">
     <p class="option" data-no="2">
     <span class="settingNameStyle1" data-xztext="_文件类型"></span>
@@ -1543,6 +1548,12 @@ const formHtml = `<form class="settingForm">
     <span class="beautify_radio" tabindex="0"></span>
     <label for="textFormat2" data-xztext="_HTML"></label>
     </span>
+    </p>
+
+    <p class="option" data-no="61">
+    <span class="settingNameStyle1" data-xztext="_保存投稿中的评论"></span>
+    <input type="checkbox" name="saveComment" class="need_beautify checkbox_switch">
+    <span class="beautify_switch"></span>
     </p>
 
     <p class="option" data-no="23">
@@ -2099,7 +2110,9 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _Toast__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ./Toast */ "./src/ts/Toast.ts");
 /* harmony import */ var _utils_Utils__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ./utils/Utils */ "./src/ts/utils/Utils.ts");
 /* harmony import */ var _CrawlInterval__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ./CrawlInterval */ "./src/ts/CrawlInterval.ts");
+/* harmony import */ var _setting_Settings__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ./setting/Settings */ "./src/ts/setting/Settings.ts");
 // 初始化抓取页面的流程
+
 
 
 
@@ -2333,6 +2346,8 @@ class InitPageBase {
         try {
             const data = await _API__WEBPACK_IMPORTED_MODULE_7__.API.getPost(postId);
             _CrawlInterval__WEBPACK_IMPORTED_MODULE_12__.crawlInterval.addTime();
+            // 把评论合并进投稿数据里，从 afterFetchPost 的角度看，相当于 post.info 自带评论
+            await this.fetchAllComments(data.body.post || data.body);
             this.afterFetchPost(data);
         }
         catch (error) {
@@ -2376,6 +2391,72 @@ class InitPageBase {
         _Log__WEBPACK_IMPORTED_MODULE_4__.log.success(_Lang__WEBPACK_IMPORTED_MODULE_0__.lang.transl('_抓取完毕'), 2);
         _EVT__WEBPACK_IMPORTED_MODULE_5__.EVT.fire('crawlFinish');
         // console.log(store.result)
+    }
+    // 获取投稿的全部评论，把结果合并到 post 的 commentList 里
+    // FANBOX 的 post.info 不再返回评论，需要调用评论接口 post.getComments，使用 offset 分页
+    async fetchAllComments(post) {
+        // 未开启保存评论时不做任何事
+        if (!_setting_Settings__WEBPACK_IMPORTED_MODULE_13__.settings.saveComment) {
+            return;
+        }
+        // commentCount 为 0 的投稿没有评论，不需要请求
+        if (post.commentCount === 0) {
+            return;
+        }
+        const limit = 50;
+        let items = [];
+        let nextUrl = null;
+        try {
+            await _CrawlInterval__WEBPACK_IMPORTED_MODULE_12__.crawlInterval.wait();
+            const data = await _API__WEBPACK_IMPORTED_MODULE_7__.API.getPostComments(post.id, 0, limit);
+            _CrawlInterval__WEBPACK_IMPORTED_MODULE_12__.crawlInterval.addTime();
+            items = data.body.commentList.items;
+            nextUrl = data.body.commentList.nextUrl;
+        }
+        catch (error) {
+            console.log(error);
+            return;
+        }
+        // 翻页获取剩余评论：优先跟随 nextUrl，否则按 offset 递增
+        // 当一页返回不足 limit 条时，说明没有更多评论了
+        // 最多获取 20 页（1000 条评论），防止异常情况导致无限请求
+        let page = 1;
+        let hasMore = items.length >= limit;
+        while (page < 20 && (nextUrl || hasMore)) {
+            try {
+                page++;
+                await _CrawlInterval__WEBPACK_IMPORTED_MODULE_12__.crawlInterval.wait();
+                let list;
+                if (nextUrl) {
+                    const data = await _API__WEBPACK_IMPORTED_MODULE_7__.API.request(nextUrl);
+                    list = data.body.commentList;
+                }
+                else {
+                    const data = await _API__WEBPACK_IMPORTED_MODULE_7__.API.getPostComments(post.id, items.length, limit);
+                    list = data.body.commentList;
+                }
+                _CrawlInterval__WEBPACK_IMPORTED_MODULE_12__.crawlInterval.addTime();
+                items = items.concat(list.items);
+                nextUrl = list.nextUrl;
+                hasMore = list.items.length >= limit;
+            }
+            catch (error) {
+                // 评论分页请求失败时停止获取更多评论，避免无限重试
+                console.log(error);
+                break;
+            }
+        }
+        // 去重，防止分页返回重复数据
+        const seen = new Set();
+        items = items.filter((comment) => {
+            if (!comment || !comment.id || seen.has(comment.id)) {
+                return false;
+            }
+            seen.add(comment.id);
+            return true;
+        });
+        // 把结果写入 post.commentList，供保存流程使用
+        post.commentList = { items, nextUrl: null };
     }
     // 抓取结果为 0 时输出提示
     noResult() {
@@ -2507,6 +2588,7 @@ class InitPostPage extends _InitPageBase__WEBPACK_IMPORTED_MODULE_3__.InitPageBa
         try {
             const data = await _API__WEBPACK_IMPORTED_MODULE_4__.API.getPost(_utils_Utils__WEBPACK_IMPORTED_MODULE_5__.Utils.getURLPathField(window.location.pathname, 'posts'));
             _CrawlInterval__WEBPACK_IMPORTED_MODULE_9__.crawlInterval.addTime();
+            await this.fetchAllComments(data.body.post || data.body);
             this.afterFetchPost(data);
         }
         catch (error) {
@@ -3644,6 +3726,8 @@ class SaveData {
             _Log__WEBPACK_IMPORTED_MODULE_3__.log.warning(_Lang__WEBPACK_IMPORTED_MODULE_4__.lang.transl('_跳过文章因为', `<a href="https://www.fanbox.cc/@${creatorId}/posts/${id}" target="_blank">${title}</a>`) +
                 _Lang__WEBPACK_IMPORTED_MODULE_4__.lang.transl('_价格限制') +
                 ` ${fee}`);
+            // 评论是投稿级别的数据，不依赖正文，也可以保存
+            this.addCommentsToText(result, data);
             if (result.files.length > 0) {
                 _Store__WEBPACK_IMPORTED_MODULE_1__.store.addResult(result);
             }
@@ -3853,6 +3937,9 @@ class SaveData {
             result.textContent.text = result.textContent.text.concat(embedLinks);
             result.textContent.fileID = this.createFileId();
         }
+        // 保存投稿中的评论
+        // 评论不依赖投稿正文，正文之外的信息（链接等）可能包含在评论里
+        this.addCommentsToText(result, data);
         if (_setting_Settings__WEBPACK_IMPORTED_MODULE_2__.settings.saveText && _setting_Settings__WEBPACK_IMPORTED_MODULE_2__.settings.textFormat === 'html') {
             result.textContent.ext = 'html';
             result.textContent.htmlData = data;
@@ -3867,7 +3954,7 @@ class SaveData {
         }
         _Store__WEBPACK_IMPORTED_MODULE_1__.store.addResult(result);
     }
-    createHtmlDocument(data, result) {
+    async createHtmlDocument(data, result) {
         const postUrl = `https://www.fanbox.cc/@${encodeURIComponent(data.creatorId)}/posts/${encodeURIComponent(data.id)}`;
         const safePostUrl = this.getSafeExternalUrl(postUrl);
         const commonResult = this.getCommonResult(result);
@@ -3966,20 +4053,181 @@ class SaveData {
                 coverHtml = this.renderImageSource(relativeCoverPath, cover.name);
             }
         }
+        const commentsHtml = await this.renderCommentsHtml(data);
         return `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self' https: http:; style-src 'unsafe-inline'; script-src 'none'; frame-src 'none'; object-src 'none'; form-action 'none';">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self' data: https: http:; style-src 'unsafe-inline'; script-src 'none'; frame-src 'none'; object-src 'none'; form-action 'none';">
 <title>${this.escapeHtml(data.title)}</title>
-<style>body{max-width:800px;margin:0 auto;padding:24px;font-family:Arial,sans-serif;line-height:1.7;color:#222;overflow-wrap:anywhere}img{max-width:100%;height:auto}a{color:#06c}figure{margin:1.5em 0}h1{line-height:1.3}.meta{color:#666;font-size:.9em}</style>
+<style>body{max-width:800px;margin:0 auto;padding:24px;font-family:Arial,sans-serif;line-height:1.7;color:#222;overflow-wrap:anywhere}img{max-width:100%;height:auto}a{color:#06c}figure{margin:1.5em 0}h1{line-height:1.3}.meta{color:#666;font-size:.9em}.comments{margin-top:2em;border-top:1px solid #ddd;padding-top:1em}.comment{display:flex;gap:.6em;margin:1em 0}.comment-icon{width:32px;height:32px;border-radius:50%;flex-shrink:0}.comment-main{flex:1;min-width:0}.comment-meta{color:#666;font-size:.85em;margin:0 0 .3em}.comment-body{white-space:pre-line}.comment-replies{margin-left:1.5em}</style>
 </head>
 <body>
 <header><h1>${this.escapeHtml(data.title)}</h1><p class="meta"><a href="${this.escapeHtml(safePostUrl)}" rel="noopener noreferrer">${this.escapeHtml(safePostUrl)}</a></p></header>
-<main>${coverHtml}${body}</main>
+<main>${coverHtml}${body}${commentsHtml}</main>
 </body>
 </html>`;
+    }
+    // 把评论转换为纯文本，添加到文本内容里
+    // HTML 格式时，评论会通过 renderCommentsHtml 渲染进 HTML 文档，这里不需要重复添加
+    addCommentsToText(result, data) {
+        var _a;
+        if (!_setting_Settings__WEBPACK_IMPORTED_MODULE_2__.settings.saveComment) {
+            return;
+        }
+        // 评论会在 HTML 文档中渲染的前提：正文存在且正文以 HTML 格式保存
+        // 对于正文受价格限制的投稿不会生成 HTML，评论仍以纯文本保存
+        if (data.body && _setting_Settings__WEBPACK_IMPORTED_MODULE_2__.settings.saveText && _setting_Settings__WEBPACK_IMPORTED_MODULE_2__.settings.textFormat === 'html') {
+            return;
+        }
+        if (!data.commentList || data.commentList.items.length === 0) {
+            return;
+        }
+        const commentLines = this.getCommentLines(data.commentList.items);
+        if (commentLines.length === 0) {
+            return;
+        }
+        // 在评论之前添加一个空行，与正文分隔开
+        if (result.textContent.text.length > 0) {
+            result.textContent.text.push('');
+        }
+        result.textContent.text = result.textContent.text.concat(commentLines);
+        (_a = result.textContent).fileID || (_a.fileID = this.createFileId());
+    }
+    // 把评论数据转换为纯文本的多行文本
+    getCommentLines(comments) {
+        const lines = [];
+        const roots = this.buildCommentTree(comments);
+        for (const comment of roots) {
+            this.commentToLines(comment, 0, lines);
+        }
+        return lines;
+    }
+    // 把一条评论转换为文本行。回复会缩进显示
+    commentToLines(comment, depth, lines) {
+        const indent = '  '.repeat(depth);
+        const user = comment.user ? comment.user.name : '';
+        const body = (comment.body || '')
+            .replace(this.extractTextReg, '')
+            .replace(/&amp;/g, '&')
+            .replace(/&lt;/g, '<')
+            .replace(/&gt;/g, '>')
+            .replace(/&quot;/g, '"')
+            .replace(/&#39;/g, "'");
+        lines.push(`${indent}${user} (${comment.createdDatetime})`);
+        if (body) {
+            for (const line of body.split(/\r?\n/)) {
+                lines.push(indent + line);
+            }
+        }
+        lines.push('');
+        for (const reply of comment.replies) {
+            this.commentToLines(reply, depth + 1, lines);
+        }
+    }
+    // 摊平评论（包括嵌套的回复），按 id 去重
+    flattenComments(comments) {
+        const flat = [];
+        const seen = new Set();
+        const walk = (list) => {
+            for (const comment of list) {
+                if (!seen.has(comment.id)) {
+                    seen.add(comment.id);
+                    flat.push(comment);
+                }
+                if (comment.replies && comment.replies.length > 0) {
+                    walk(comment.replies);
+                }
+            }
+        };
+        walk(comments);
+        return flat;
+    }
+    // 把评论构造成树形结构
+    // FANBOX 返回的评论既有嵌套在 replies 字段里的，也有分页获取时平铺在 items 里的回复
+    // 这里把它们摊平、去重后，再根据 parentCommentId 构造成树
+    buildCommentTree(comments) {
+        const map = new Map();
+        for (const comment of this.flattenComments(comments)) {
+            map.set(comment.id, Object.assign(Object.assign({}, comment), { replies: [] }));
+        }
+        const roots = [];
+        for (const comment of map.values()) {
+            if (comment.parentCommentId && map.has(comment.parentCommentId)) {
+                map.get(comment.parentCommentId).replies.push(comment);
+            }
+            else {
+                roots.push(comment);
+            }
+        }
+        return roots;
+    }
+    // 渲染评论部分的 HTML
+    async renderCommentsHtml(data) {
+        if (!_setting_Settings__WEBPACK_IMPORTED_MODULE_2__.settings.saveComment ||
+            !data.commentList ||
+            data.commentList.items.length === 0) {
+            return '';
+        }
+        const roots = this.buildCommentTree(data.commentList.items);
+        const avatarMap = await this.fetchCommentAvatars(roots);
+        const comments = roots
+            .map((comment) => this.renderCommentHtml(comment, avatarMap))
+            .join('\n');
+        return `<section class="comments"><h2>${this.escapeHtml(_Lang__WEBPACK_IMPORTED_MODULE_4__.lang.transl('_评论'))}</h2>${comments}</section>`;
+    }
+    // 抓取评论者的头像，转换为 base64 data URL。失败的头像回退到原网址
+    async fetchCommentAvatars(comments) {
+        const map = new Map();
+        const seen = new Set();
+        await Promise.all(this.flattenComments(comments).map(async (comment) => {
+            const url = comment.user && comment.user.iconUrl;
+            if (url && !seen.has(url)) {
+                seen.add(url);
+                const dataUrl = await this.fetchImageAsDataUrl(url);
+                if (dataUrl) {
+                    map.set(url, dataUrl);
+                }
+            }
+        }));
+        return map;
+    }
+    // 抓取一张图片并转换为 base64 data URL
+    async fetchImageAsDataUrl(url) {
+        try {
+            const response = await fetch(url);
+            if (!response.ok) {
+                return null;
+            }
+            const blob = await response.blob();
+            return await new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = () => resolve(reader.result);
+                reader.onerror = () => reject(reader.error);
+                reader.readAsDataURL(blob);
+            });
+        }
+        catch (error) {
+            // 头像抓取失败时返回 null，渲染时回退到原网址
+            return null;
+        }
+    }
+    // 渲染一条评论的 HTML。回复会嵌套渲染
+    renderCommentHtml(comment, avatarMap) {
+        const user = comment.user ? comment.user.name : '';
+        const avatarUrl = comment.user
+            ? avatarMap.get(comment.user.iconUrl) || comment.user.iconUrl
+            : '';
+        const meta = `${this.escapeHtml(user)} · ${this.escapeHtml(comment.createdDatetime)}`;
+        const avatar = avatarUrl
+            ? `<img class="comment-icon" src="${this.escapeHtml(avatarUrl)}" alt="" loading="lazy">`
+            : '';
+        const body = this.escapeHtml(comment.body || '');
+        const replies = comment.replies
+            .map((reply) => this.renderCommentHtml(reply, avatarMap))
+            .join('\n');
+        return `<div class="comment">${avatar}<div class="comment-main"><p class="comment-meta">${meta}</p><div class="comment-body">${body}</div>${replies ? `<div class="comment-replies">${replies}</div>` : ''}</div></div>`;
     }
     renderInlineText(text, styles, links) {
         const boundaries = new Set([0, text.length]);
@@ -5643,7 +5891,7 @@ class DownloadControl {
     }
     // 查找需要进行下载的作品，建立下载
     // 可选第二个参数：使用缩略图 url 而不是原图 url 进行下载
-    createDownload(progressBarIndex, useThumb = false) {
+    async createDownload(progressBarIndex, useThumb = false) {
         const index = _DownloadStates__WEBPACK_IMPORTED_MODULE_12__.downloadStates.getFirstDownloadItem();
         if (index === undefined) {
             throw new Error('There are no data to download');
@@ -5679,7 +5927,7 @@ class DownloadControl {
                             textContent: result,
                         };
                         result.text = [
-                            _SaveData__WEBPACK_IMPORTED_MODULE_16__.saveData.createHtmlDocument(result.htmlData, resultMeta),
+                            await _SaveData__WEBPACK_IMPORTED_MODULE_16__.saveData.createHtmlDocument(result.htmlData, resultMeta),
                         ];
                         result.ext = 'html';
                     }
@@ -7486,6 +7734,14 @@ So the file name set by the downloader is lost, and the file name becomes the la
         '게시물의 <span class="key">텍스트</span> 저장',
         'Сохранить <span class="key">текст</span> в публикациях',
     ],
+    _保存投稿中的评论: [
+        '保存投稿中的<span class="key">评论</span>',
+        '儲存投稿中的<span class="key">評論</span>',
+        'Save <span class="key">comments</span> in the posts',
+        '投稿の<span class="key">コメント</span>を保存',
+        '게시물의 <span class="key">댓글</span> 저장',
+        'Сохранить <span class="key">комментарии</span> в публикациях',
+    ],
     _纯文本: [
         '纯文本',
         '純文字',
@@ -7495,6 +7751,7 @@ So the file name set by the downloader is lost, and the file name becomes the la
         'Обычный текст',
     ],
     _HTML: ['HTML', 'HTML', 'HTML', 'HTML', 'HTML', 'HTML'],
+    _评论: ['评论', '評論', 'Comments', 'コメント', '댓글', 'Комментарии'],
     _抓取文件数量: [
         '已获取 {} 个文件',
         '已取得 {} 個檔案',
@@ -9210,6 +9467,7 @@ class FormSettings {
                 'postDate',
                 'saveLink',
                 'saveText',
+                'saveComment',
                 'autoStartDownload',
                 'showAdvancedSettings',
                 'bgDisplay',
@@ -9823,6 +10081,7 @@ class Settings {
             saveLink: true,
             saveText: false,
             textFormat: 'txt',
+            saveComment: false,
             userSetName: 'fanbox/{user}/{date}-{title}/{index}',
             autoStartDownload: true,
             downloadThread: 2,
