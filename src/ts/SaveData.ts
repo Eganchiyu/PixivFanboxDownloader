@@ -527,6 +527,11 @@ class SaveData {
 
     const commentsHtml = await this.renderCommentsHtml(data)
 
+    // 在正文与评论区之间添加分隔符，没有评论时不添加
+    const commentsSeparator = commentsHtml
+      ? `<p class="comment-separator">${lang.transl('_评论')}<br>---</p>`
+      : ''
+
     return `<!doctype html>
 <html lang="en">
 <head>
@@ -540,7 +545,7 @@ class SaveData {
 <header><h1>${this.escapeHtml(data.title)}</h1><p class="meta"><a href="${this.escapeHtml(
       safePostUrl,
     )}" rel="noopener noreferrer">${this.escapeHtml(safePostUrl)}</a></p></header>
-<main>${coverHtml}${body}${commentsHtml}</main>
+<main>${coverHtml}${body}${commentsSeparator}${commentsHtml}</main>
 </body>
 </html>`
   }
